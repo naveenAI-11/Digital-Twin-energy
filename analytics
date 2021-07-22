@@ -1,0 +1,166 @@
+!pip install dash==1.17.0
+import pandas as pd
+import numpy as np
+import datetime as dt
+import time
+!pip install schedule
+!pip install pvlib
+import pvlib
+from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
+from pvlib.modelchain import ModelChain
+from pvlib.location import Location
+from pvlib.pvsystem import PVSystem
+import requests
+import json
+def getdata():
+    global realtime_data_perv
+    location="Glenthompson"
+    url=f"https://www.connectgh.com.au/api/records/1.0/search/?dataset=weather-stations&q=&rows=10000&sort=eventid&refine.location={location}"
+    response=requests.get(url)
+    realtime_data=pd.io.json.json_normalize(pd.DataFrame(response.json()["records"])["fields"])
+    return realtime_data
+    def solar_processing(realtime_data):
+    global realtime_data_perv
+    realtime_data["time"]=pd.to_datetime(realtime_data["time"],dayfirst=True).dt.tz_convert("Australia/Sydney")
+    realtime_data=realtime_data.sort_values(by='time',ascending=False)
+    if not realtime_data_prev.empty:
+        comparison_df = realtime_data.merge(realtime_data_prev,indicator=True,how='outer',on="time",suffixes=['', '_'])
+        comparison_df1=comparison_df[comparison_df['_merge'] == 'left_only']
+        comparison_df1.drop(comparison_df1.columns[16:32],axis=1,inplace=True)
+        realtime_data = pd.concat([comparison_df1,realtime_data_prev],ignore_index=True)
+        print(realtime_data_prev.head())
+        print(realtime_data.head())
+        realtime_data_prev=realtime_data
+
+        weather_df=pd.DataFrame()
+        weather_df["Date_Time"]=realtime_data["time"]
+        weather_df["ghi"]=weather_data['solar']
+        weather_df["temp_air"]=realtime_data["airtemp"]
+        weather_df["wind_speed"]=realtime_data['windspeed']*(1000/3600)
+
+        Grampians = Location(realtime_data['latitude'][0], realtime_data["longitude"][0], "Australia/Sydney", 50, 'Grampians')
+        new1 = Grampians.get_solarposition(pd.DatetimeIndex(weather_df['Date_Time']),temperature=weather_df["temp_air"])
+
+        x=(pd.DatetimeIndex(weather_df['Date_Time'])).dayofyear
+        new2=new1["zenith"].reset_index().drop("Date_Time",axis=1)
+        temp=pvlib.irradiance.erbs(realtime_data['solar'],new2['zenith'],x)
+
+        weather_df["dni"]=temp["dni"]
+        weather_df["dhi"]=temp["dhi"]
+        weather_df["ghi"]=realtime_data['solar']
+        weather_df.set_index('Date_Time',inplace=True)
+        print(weather_df)
+
+        sandia_modules=pvlib.pvsystem.retrieve_sam(name="SandiaMod")
+        cec_inverters = pvlib.pvsystem.retrieve_sam('cecinverter')
+        cec_inverter = cec_inverters['ABB__MICRO_0_25_I_OUTD_US_208__208V_']
+        module=sandia_modules["Advent_Solar_AS160___2006_"]
+
+        temperature_model_parameters = TEMPERATURE_MODEL_PARAMETERS['sapm']['open_rack_glass_glass']
+        system = PVSystem(surface_tilt=20, surface_azimuth=200,module_parameters=module,inverter_parameters=cec_inverter,temperature_model_parameters=temperature_model_parameters,modules_per_string=5,strings_per_inverter=5)
+
+        mc = ModelChain(system, Grampians)
+        xc=mc.run_model(weather_df)
+        print(xc.dc['p_mp'])
+
+        power=pd.DataFrame()
+        power['solar_generated']=mc.dc['p_mp']
+        power['solar_generated']=power['solar_generated'].fillna(0)
+        print(power)
+        power["Year"]=pd.DatetimeIndex(power.index).year
+        power['Month']=pd.DatetimeIndex(power.index).month
+        power['Day']=pd.DatetimeIndex(power.index).day
+        power['hour']=pd.DatetimeIndex(power.index).hour
+        power['min']=pd.DatetimeIndex(power.index).minute
+        power=power.groupby(["Year","Month","Day","hour"])["solar_generated"].mean().reset_index()
+        power=power.reset_index()
+        power=power.reindex(index=power.index[::-1]).reset_index()
+        power=power.reset_index()
+        power['Time_diff'] = pd.to_datetime(power['Date_Time']).diff(-1).dt.total_seconds().div(3600)
+        power=power.reindex(index=power.index[::-1]).reset_index()
+        power=power.drop(["index"],axis=1)
+        power=power.fillna(0.25)
+        power['load_size']=0
+        hourly_consumption={}
+        Summer= [12,1,2]
+        Autumn=[3,4,5]
+        Winter=[6,7,8]
+        Spring=[9,10,11]
+        hourly_consumption[0]=[570,500,590,400]
+        hourly_consumption[1]=[500,450,420,355]
+        hourly_consumption[2]=[430,390,400,340]
+        hourly_consumption[3]=[400,380,387,320]
+        hourly_consumption[4]=[385,360,365,330]
+        hourly_consumption[5]=[375,367,366,348]
+        hourly_consumption[6]=[365,366,410,365.5]
+        hourly_consumption[7]=[470,460,580,480]
+        hourly_consumption[8]=[570,560,800,565]
+        hourly_consumption[9]=[580,550,780,530]
+        hourly_consumption[10]=[590,560,650,510]
+        hourly_consumption[11]=[600,580,620,500]
+        hourly_consumption[12]=[640,530,605,500]
+        hourly_consumption[13]=[680,540,590,460]
+        hourly_consumption[14]=[710,550,560,450]
+        hourly_consumption[15]=[730,560,570,460]
+        hourly_consumption[16]=[770,580,600,480]
+        hourly_consumption[17]=[810,600,800,530]
+        hourly_consumption[18]=[920,800,1200,680]
+        hourly_consumption[19]=[970,820,1350,700]
+        hourly_consumption[20]=[900,830,1280,660]
+        hourly_consumption[21]=[830,780,1180,640]
+        hourly_consumption[22]=[800,700,950,580]
+        hourly_consumption[23]=[650,610,800,470]
+        i=0
+        for ind in power.index:
+            if power['Month'][i] in Summer:
+                power['load_size'][i]=hourly_consumption[power['hour'][i]][0]
+            elif power['Month'][i] in Autumn:
+                power['load_size'][i]=hourly_consumption[power['hour'][i]][1]
+            elif power['Month'][i] in Winter:
+                power['load_size'][i]=hourly_consumption[power['hour'][i]][2]
+            elif power['Month'][i] in Spring:
+                power['load_size'][i]=hourly_consumption[power['hour'][i]][3]
+        i+=1
+
+        battery_capacity=3000
+        battery_min_SOC=0.3
+        SOC=1.0
+        power["battery_SOC"]=0.0
+        power["battery_SOC_sensor"]=0
+        power["to_grid"]=0.0
+        power["from_grid"]=0.0
+        ind=0
+        for i in power.index:
+            print(i)
+        old_SOC = SOC
+      # available energy in battery: Wh
+        available = (SOC-battery_min_SOC)* battery_capacity
+      # PV energy generated during this hour: Wh
+        generated = power['solar_generated'][ind]
+      # Energy consumed by loads during this hour: Wh
+        consumed =power['load_size'][ind]
+
+      # Power balance
+        diff = available + (generated - consumed)*power["Time_diff"][ind]
+
+      # Base SOC calculation: Wh / Wh -> percentage
+        SOC = ((diff) / battery_capacity)+battery_min_SOC
+
+      # Bound between 0 and 100 %
+        if SOC > 1.0:
+            SOC = 1.0
+            power["to_grid"][ind]=(diff-battery_capacity+(battery_min_SOC*battery_capacity))/(power["Time_diff"][ind])
+        elif SOC < battery_min_SOC:
+            SOC = battery_min_SOC
+            power["from_grid"][ind]=-(diff/(power["Time_diff"][ind]))
+            power["battery_SOC"][ind]=SOC
+            ind+=1
+    power["battery_SOC_sensor"]=((power['battery_SOC']-battery_min_SOC)/(1-battery_min_SOC))*100
+    power['Date'] = pd.to_datetime(power['Year'].astype(str) + power['Month'].astype(str).str.zfill(2)+ power['Day'].astype(str).str.zfill(2), format='%Y%m%d')
+    cols = power.columns.tolist()
+    cols = cols[-1:] + cols[:-1]
+    cols
+    power = power[cols]
+    print(power)
+    power.to_csv("power.csv")
+    return power
